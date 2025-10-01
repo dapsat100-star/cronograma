@@ -141,11 +141,39 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str,
     return fig
 
 def exportar_excel(df: pd.DataFrame) -> bytes:
-    buf = io.BytesIO(); df_exp = df.copy()
-    df_exp["data"] = pd.to_datetime(df_exp["data"]).dt.strftime("%Y-%m-%d")
+    """
+    Exporta apenas as colunas necessárias e converte tudo para string.
+    Evita NaT/tz/objetos que quebram o to_excel.
+    """
+    import io
+    import pandas as pd
+
+    cols = ["site_nome", "data", "status", "observacao", "validador", "data_validacao"]
+    cols = [c for c in cols if c in df.columns]
+    df_exp = df[cols].copy()
+
+    # data -> YYYY-MM-DD (string)
+    if "data" in df_exp.columns:
+        df_exp["data"] = pd.to_datetime(df_exp["data"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+
+    # data_validacao -> YYYY-MM-DD HH:MM:SS (string, vazio se NaT)
+    if "data_validacao" in df_exp.columns:
+        dv = pd.to_datetime(df_exp["data_validacao"], errors="coerce", utc=True)
+        try:
+            dv = dv.dt.tz_convert(None)
+        except Exception:
+            pass
+        df_exp["data_validacao"] = dv.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
+
+    # Demais colunas como string simples
+    for c in set(df_exp.columns) - {"data", "data_validacao"}:
+        df_exp[c] = df_exp[c].fillna("").astype(str)
+
+    buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         df_exp.to_excel(writer, index=False, sheet_name="validacao")
-    buf.seek(0); return buf.read()
+    buf.seek(0)
+    return buf.read()
 
 # ---------- Entrada ----------
 with st.expander("📥 Carregar planilha", expanded=True):
@@ -319,3 +347,4 @@ with colA: nome_arquivo = st.text_input("Nome do arquivo", value="passagens_vali
 with colB:
     xlsb = exportar_excel(st.session_state.df_validado)
     st.download_button("Baixar Excel validado", data=xlsb, file_name=nome_arquivo, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
