@@ -1,10 +1,7 @@
 
 # app.py
-# Streamlit – Calendário com validação via checkboxes "sim"/"nao" integradas ao calendário
-# Entrada: 1ª coluna = site; demais colunas = "Mês Ano" (ex.: "Outubro 2025"), células com dias "10,12,13".
-# Fluxo: tabela editável com colunas "sim" e "nao" (checkbox) → mapeia para Status (Aprovada/Rejeitada/Pendente) → calendário colore.
-# Também há: Salvar alterações + Aprovar/Rejeitar tudo por dia.
-# Autor: ChatGPT – MIT License
+# Streamlit – Calendário com validação via checkboxes "sim"/"nao", ações em lote,
+# exportação Excel "safe" e COMMIT automático no GitHub (via st.secrets).
 
 import io
 from typing import Dict, List, Optional
@@ -14,16 +11,77 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import requests
+import base64, json, datetime as dt
+
+# ==== GitHub integration (salvar Excel versionado) ====
+def _gh_headers():
+    return {
+        "Authorization": f"Bearer {st.secrets['github_token']}",
+        "Accept": "application/vnd.github+json",
+    }
+
+def gh_get_file_sha(path: str):
+    repo = st.secrets["github_repo"]
+    branch = st.secrets.get("github_branch", "main")
+    url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
+    r = requests.get(url, headers=_gh_headers(), timeout=20)
+    return r.json().get("sha") if r.status_code == 200 else None
+
+def gh_put_file(path: str, content_bytes: bytes, message: str, sha: str | None = None):
+    repo = st.secrets["github_repo"]
+    branch = st.secrets.get("github_branch", "main")
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content_bytes).decode("utf-8"),
+        "branch": branch,
+    }
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(url, headers=_gh_headers(), json=payload, timeout=30)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Falha ao salvar no GitHub ({r.status_code}): {r.text}")
+    return r.json()
+
+def gh_save_snapshot(xls_bytes: bytes, author: str | None = None) -> dict:
+    """
+    Salva excel em data/validado/YYYY/MM/validado-YYYYMMDD-HHMMSS.xlsx
+    e atualiza data/validado/latest.json com metadados.
+    """
+    root = st.secrets.get("gh_data_root", "data/validado")
+    now = dt.datetime.utcnow()
+    yyyy = now.strftime("%Y"); mm = now.strftime("%m"); stamp = now.strftime("%Y%m%d-%H%M%S")
+    excel_rel_path = f"{root}/{yyyy}/{mm}/validado-{stamp}.xlsx"
+
+    # 1) Excel
+    gh_put_file(
+        path=excel_rel_path,
+        content_bytes=xls_bytes,
+        message=f"[streamlit] snapshot {stamp} (autor={author or 'anon'})",
+        sha=None,
+    )
+
+    # 2) latest.json
+    latest = {"saved_at_utc": now.isoformat()+"Z", "author": author or "", "path": excel_rel_path}
+    latest_path = f"{root}/latest.json"
+    sha_old = gh_get_file_sha(latest_path)
+    gh_put_file(
+        path=latest_path,
+        content_bytes=json.dumps(latest, ensure_ascii=False, indent=2).encode("utf-8"),
+        message=f"[streamlit] update latest -> {excel_rel_path}",
+        sha=sha_old,
+    )
+    return latest
+# ==== fim GitHub integration ====
 
 st.set_page_config(page_title="Calendário de Passagens – Validação", page_icon="🛰️", layout="wide")
-st.title("🛰️ Calendário de Validação (checkbox sim/nao)")
-st.caption("Edite pela tabela: marque **sim** (aprovada) ou **nao** (rejeitada). Sem marcação = pendente.")
+st.title("🛰️ Calendário de Validação (checkbox sim/nao + GitHub)")
+st.caption("Marque **sim/nao** na tabela, salve e o app comita o Excel no GitHub (histórico versionado).")
 
 PT_MESES: Dict[str, int] = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4, "maio": 5, "junho": 6,
     "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
 }
-STATUS_OPCOES = ["Pendente", "Aprovada", "Rejeitada"]
 
 if "df_validado" not in st.session_state:
     st.session_state.df_validado = None
@@ -34,7 +92,7 @@ if "temp_edits" not in st.session_state:
 def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
     cols_mes = []
     for c in df.columns:
-        s = str(c).strip().replace('\xa0', ' ').lower()
+        s = str(c).strip().replace('\\xa0', ' ').lower()
         partes = s.split()
         if len(partes) == 2 and partes[0] in PT_MESES:
             try:
@@ -45,7 +103,7 @@ def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
 
 def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = None) -> pd.DataFrame:
     df = df_raw.copy()
-    df.columns = [str(c).strip().replace('\xa0', ' ') for c in df.columns]
+    df.columns = [str(c).strip().replace('\\xa0', ' ') for c in df.columns]
     if col_site is None:
         col_site = df.columns[0]
     if col_site != "site_nome":
@@ -145,18 +203,13 @@ def exportar_excel(df: pd.DataFrame) -> bytes:
     Exporta apenas as colunas necessárias e converte tudo para string.
     Evita NaT/tz/objetos que quebram o to_excel.
     """
-    import io
-    import pandas as pd
-
     cols = ["site_nome", "data", "status", "observacao", "validador", "data_validacao"]
     cols = [c for c in cols if c in df.columns]
     df_exp = df[cols].copy()
 
-    # data -> YYYY-MM-DD (string)
     if "data" in df_exp.columns:
         df_exp["data"] = pd.to_datetime(df_exp["data"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
-    # data_validacao -> YYYY-MM-DD HH:MM:SS (string, vazio se NaT)
     if "data_validacao" in df_exp.columns:
         dv = pd.to_datetime(df_exp["data_validacao"], errors="coerce", utc=True)
         try:
@@ -165,7 +218,6 @@ def exportar_excel(df: pd.DataFrame) -> bytes:
             pass
         df_exp["data_validacao"] = dv.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
 
-    # Demais colunas como string simples
     for c in set(df_exp.columns) - {"data", "data_validacao"}:
         df_exp[c] = df_exp[c].fillna("").astype(str)
 
@@ -188,7 +240,7 @@ with st.expander("📥 Carregar planilha", expanded=True):
             else:
                 try:
                     df_raw = pd.read_excel(up)
-                    df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
+                    df_raw.columns = [str(c).strip().replace('\\xa0', ' ') for c in df_raw.columns]
                     st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint); st.session_state.temp_edits = None
                     st.success("Planilha carregada!")
                 except Exception as e: st.error(f"Erro: {e}")
@@ -199,7 +251,7 @@ with st.expander("📥 Carregar planilha", expanded=True):
                 try:
                     r = requests.get(url_raw, timeout=20); r.raise_for_status()
                     df_raw = pd.read_excel(io.BytesIO(r.content))
-                    df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
+                    df_raw.columns = [str(c).strip().replace('\\xa0', ' ') for c in df_raw.columns]
                     st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint); st.session_state.temp_edits = None
                     st.success("Planilha carregada da URL!")
                 except Exception as e: st.error(f"Erro: {e}")
@@ -227,6 +279,7 @@ with st.sidebar:
     mes_ano = st.selectbox("Mês", options=meses, index=max(0, len(meses)-1))
     only_color_with_events = st.checkbox("Colorir só dias com passagem", value=True)
     show_badges = st.checkbox("Mostrar bolinhas/contagem", value=True)
+    st.text_input("Seu nome (autor do commit)", key="usuario_logado", placeholder="ex.: Márcio")
 
 # Aplicar filtros
 mask = dfv["site_nome"].isin(site_sel) & (dfv["yyyymm"] == mes_ano)
@@ -236,10 +289,8 @@ fdf = dfv.loc[mask].copy().sort_values(["data", "site_nome"]) if not dfv.empty e
 st.subheader("Tabela de passagens para validar")
 view = fdf[["site_nome", "data", "status", "observacao", "validador", "data_validacao"]].copy()
 view["data"] = pd.to_datetime(view["data"]).dt.strftime("%Y-%m-%d")
-# novas colunas de check
 view["sim"] = (view["status"] == "Aprovada")
 view["nao"] = (view["status"] == "Rejeitada")
-# garantir dtypes
 view["observacao"] = view["observacao"].astype("string")
 view["validador"] = view["validador"].astype("string")
 view["data_validacao"] = view["data_validacao"].apply(lambda x: "" if pd.isna(x) else pd.to_datetime(x).strftime("%Y-%m-%d %H:%M:%S")).astype("string")
@@ -262,7 +313,6 @@ edited = st.data_editor(
     key="editor_v3",
 )
 
-# Botões
 col_save1, col_save2 = st.columns([1,6])
 with col_save1:
     save_clicked = st.button("💾 Salvar alterações", type="primary")
@@ -270,18 +320,14 @@ with col_save2:
     if st.session_state.temp_edits is not None:
         st.caption("Há edições não salvas. Clique em **Salvar alterações** para aplicar.")
 
-# Memória temporária
 if st.session_state.temp_edits is None or not edited.equals(st.session_state.temp_edits):
     st.session_state.temp_edits = edited.copy()
 
-# Aplicar ao DF base quando salvar
 if save_clicked:
     base = st.session_state.df_validado
     e = st.session_state.temp_edits.copy()
-    # reconverte data
     e["data"] = pd.to_datetime(e["data"]).dt.date
 
-    # Regras: sim=True => Aprovada; nao=True => Rejeitada; ambos False => Pendente; ambos True => Rejeitada (prioridade ao 'nao')
     def decide(row):
         if row.get("nao", False):
             return "Rejeitada"
@@ -290,24 +336,26 @@ if save_clicked:
         return "Pendente"
 
     e["status_novo"] = e.apply(decide, axis=1)
-    # aplica observacao/validador e status ao base
     keys = ["site_nome", "data"]
     upd_cols = ["status_novo", "observacao", "validador"]
     merged = base.drop(columns=["observacao", "validador"], errors="ignore").merge(e[keys + upd_cols], on=keys, how="left")
-    # substitui status quando fornecido
     mask_new = ~merged["status_novo"].isna()
     merged.loc[mask_new, "status"] = merged.loc[mask_new, "status_novo"]
     merged = merged.drop(columns=["status_novo"])
-
-    # timestamp quando vira Aprovada/Rejeitada sem carimbo
     mudou = merged["status"].isin(["Aprovada", "Rejeitada"]) & merged["data_validacao"].isna()
     merged.loc[mudou, "data_validacao"] = pd.Timestamp.utcnow()
-
     st.session_state.df_validado = merged
     st.session_state.temp_edits = None
     st.success("Alterações salvas!")
-
-    # Recalcula fdf
+    # publicar no GitHub
+    try:
+        xlsb = exportar_excel(st.session_state.df_validado)
+        usuario = st.session_state.get("usuario_logado", "")
+        meta = gh_save_snapshot(xlsb, author=usuario)
+        st.info(f"Salvo no GitHub: `{meta['path']}` (UTC: {meta['saved_at_utc']})")
+    except Exception as e:
+        st.warning(f"Salvou localmente, mas falhou ao publicar no GitHub: {e}")
+    # recalc
     dfv = merged
     mask = dfv["site_nome"].isin(site_sel) & (dfv["yyyymm"] == mes_ano)
     fdf = dfv.loc[mask].copy().sort_values(["data", "site_nome"]) if not dfv.empty else dfv.copy()
@@ -324,14 +372,30 @@ if dias_disponiveis:
             idx = (pd.to_datetime(base["data"]).dt.date == d_sel) & base["site_nome"].isin(site_sel) & (base["yyyymm"] == mes_ano)
             base.loc[idx, "status"] = "Aprovada"
             base.loc[idx & base["data_validacao"].isna(), "data_validacao"] = pd.Timestamp.utcnow()
-            st.session_state.df_validado = base; st.success(f"Aprovado tudo em {d_sel}.")
+            st.session_state.df_validado = base
+            st.success(f"Aprovado tudo em {d_sel}.")
+            try:
+                xlsb = exportar_excel(st.session_state.df_validado)
+                usuario = st.session_state.get("usuario_logado", "")
+                meta = gh_save_snapshot(xlsb, author=usuario)
+                st.info(f"Salvo no GitHub: `{meta['path']}` (UTC: {meta['saved_at_utc']})")
+            except Exception as e:
+                st.warning(f"Falhou ao publicar no GitHub: {e}")
     with cB:
         if st.button("⛔ Rejeitar tudo do dia"):
             base = st.session_state.df_validado
             idx = (pd.to_datetime(base["data"]).dt.date == d_sel) & base["site_nome"].isin(site_sel) & (base["yyyymm"] == mes_ano)
             base.loc[idx, "status"] = "Rejeitada"
             base.loc[idx & base["data_validacao"].isna(), "data_validacao"] = pd.Timestamp.utcnow()
-            st.session_state.df_validado = base; st.success(f"Rejeitado tudo em {d_sel}.")
+            st.session_state.df_validado = base
+            st.success(f"Rejeitado tudo em {d_sel}.")
+            try:
+                xlsb = exportar_excel(st.session_state.df_validado)
+                usuario = st.session_state.get("usuario_logado", "")
+                meta = gh_save_snapshot(xlsb, author=usuario)
+                st.info(f"Salvo no GitHub: `{meta['path']}` (UTC: {meta['saved_at_utc']})")
+            except Exception as e:
+                st.warning(f"Falhou ao publicar no GitHub: {e}")
 else:
     st.caption("Sem passagens no mês/site(s) filtrados.")
 
@@ -340,7 +404,7 @@ st.subheader("Calendário do mês selecionado")
 fig = montar_calendario(fdf, mes_ano, only_color_with_events=True, show_badges=True)
 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-# ---------- Exportar ----------
+# ---------- Exportar manual ----------
 st.markdown("---"); st.subheader("Exportar")
 colA, colB = st.columns([1,2])
 with colA: nome_arquivo = st.text_input("Nome do arquivo", value="passagens_validado.xlsx")
@@ -348,3 +412,10 @@ with colB:
     xlsb = exportar_excel(st.session_state.df_validado)
     st.download_button("Baixar Excel validado", data=xlsb, file_name=nome_arquivo, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+with st.expander("ℹ️ Notas", expanded=False):
+    st.markdown(
+        "- Preencha os **Secrets** no Streamlit Cloud: `github_token`, `github_repo`, `github_branch`, `gh_data_root`.\n"
+        "- Cada **Salvar** ou ação em lote cria um **snapshot versionado** no repositório configurado.\n"
+        "- Os arquivos ficam em `gh_data_root/AAAA/MM/validado-AAAAMMDD-HHMMSS.xlsx` + `latest.json`.\n"
+        "- Meses em português (Janeiro..Dezembro) com ano no cabeçalho; células com dias `10,12,13`."
+    )
