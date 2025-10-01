@@ -214,7 +214,9 @@ with st.expander("📥 Carregar planilha", expanded=True):
             else:
                 try:
                     df_raw = pd.read_excel(up)
-                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
+# Normalização de cabeçalhos (remove espaços extras e \xa0)
+df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
+st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
                     st.success("Planilha carregada!")
                 except Exception as e:
                     st.error(f"Erro: {e}")
@@ -228,7 +230,9 @@ with st.expander("📥 Carregar planilha", expanded=True):
                     r = requests.get(url_raw, timeout=20)
                     r.raise_for_status()
                     df_raw = pd.read_excel(io.BytesIO(r.content))
-                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
+# Normalização de cabeçalhos (remove espaços extras e \xa0)
+df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
+st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
                     st.success("Planilha carregada da URL!")
                 except Exception as e:
                     st.error(f"Erro: {e}")
