@@ -1,3 +1,4 @@
+
 # app.py
 # Streamlit – Calendário de validação a partir de Excel "matriz de meses" (PT-BR)
 # Entrada: 1ª coluna = nome do site; Demais colunas = "Mês Ano" (ex.: "Outubro 2025").
@@ -30,10 +31,10 @@ st.caption(
 )
 
 # -----------------------------
-# 🧾 Layout esperado do Excel (exemplo do seu arquivo)
+# 🧾 Layout esperado do Excel (exemplo)
 # -----------------------------
-# Coluna 1: nome do site (no seu arquivo veio como "Unnamed: 0")
-# Colunas seguintes: "Outubro 2025", "Novembro 2025", ... (português)
+# Coluna 1: nome do site (no seu arquivo veio como "Unnamed: 0" ou "Site")
+# Demais colunas: "Outubro 2025", "Novembro 2025", ... (português)
 # Células: dias separados por vírgula, p.ex. "10,12,13,21"
 
 PT_MESES: Dict[str, int] = {
@@ -68,10 +69,9 @@ def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
                 pass
     return cols_mes
 
-
 def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = None) -> pd.DataFrame:
-    """Converte a planilha matriz (site x meses com dias separados por vírgula) em DF "explodido":
-    colunas: site_nome, data (datetime64[ns, UTC? -> usaremos sem tz]), status, observacao, validador, data_validacao.
+    """Converte a planilha matriz (site x meses com dias separados por vírgula) em DF 'explodido':
+    colunas: site_nome, data (date), status, observacao, validador, data_validacao.
     """
     df = df_raw.copy()
 
@@ -99,7 +99,7 @@ def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = N
             mes_num = PT_MESES.get(mes_nome.lower())
             ano = int(ano_str)
 
-            # Quebra pelos dias ("10,12,13"). Aceita espaço depois da vírgula.
+            # Quebra pelos dias (ex.: "10,12,13"). Aceita espaço depois da vírgula.
             dias = [d.strip() for d in str(dias_str).split(',') if d.strip() != ""]
             for d in dias:
                 try:
@@ -107,7 +107,7 @@ def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = N
                     dt = pd.Timestamp(year=ano, month=mes_num, day=di)
                     reg.append({"site_nome": site, "data": dt.date()})
                 except Exception:
-                    # ignora tokens inválidos
+                    # ignora tokens inválidos (ex.: células sujas)
                     continue
 
     df_expl = pd.DataFrame(reg)
@@ -123,7 +123,6 @@ def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = N
     # Campos auxiliares
     df_expl["yyyymm"] = pd.to_datetime(df_expl["data"]).dt.strftime("%Y-%m")
     return df_expl.sort_values(["data", "site_nome"]).reset_index(drop=True)
-
 
 def montar_calendario(df_mes: pd.DataFrame, mes_ano: str) -> go.Figure:
     """Desenha um calendário mensal (cores por status mais severo do dia)."""
@@ -183,7 +182,6 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str) -> go.Figure:
     fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="white", plot_bgcolor="white")
     return fig
 
-
 def exportar_excel(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     df_exp = df.copy()
@@ -214,9 +212,9 @@ with st.expander("📥 Carregar planilha", expanded=True):
             else:
                 try:
                     df_raw = pd.read_excel(up)
-# Normalização de cabeçalhos (remove espaços extras e \xa0)
-df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
-st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
+                    # ✅ Normalização de cabeçalhos (remove espaços e \xa0)
+                    df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
+                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
                     st.success("Planilha carregada!")
                 except Exception as e:
                     st.error(f"Erro: {e}")
@@ -230,15 +228,15 @@ st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
                     r = requests.get(url_raw, timeout=20)
                     r.raise_for_status()
                     df_raw = pd.read_excel(io.BytesIO(r.content))
-# Normalização de cabeçalhos (remove espaços extras e \xa0)
-df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
-st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
+                    # ✅ Normalização de cabeçalhos (remove espaços e \xa0)
+                    df_raw.columns = [str(c).strip().replace('\xa0', ' ') for c in df_raw.columns]
+                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
                     st.success("Planilha carregada da URL!")
                 except Exception as e:
                     st.error(f"Erro: {e}")
     with b3:
         if st.button("Gerar exemplo sintético"):
-            # Exemplo rápido com 3 sites e 3 meses
+            # Exemplo com 3 sites e 3 meses
             exemplo = pd.DataFrame({
                 "Site": ["UPGN Cabiunas", "UPGN Cacimbas", "P-68"],
                 "Outubro 2025": ["10,12,13,20", "10,12,13,21", "10,12,13,22"],
@@ -331,12 +329,13 @@ with colB:
 with st.expander("ℹ️ Notas e dicas", expanded=False):
     st.markdown(
         """
-        - Aceita meses em **português** (Janeiro ... Dezembro) no cabeçalho, com **ano** (ex.: `Outubro 2025`).
-        - As células devem conter **dias separados por vírgula** (p.ex. `10,12,13`). Espaços são ignorados.
-        - A validação registra automaticamente a **data/hora UTC** em `data_validacao` ao marcar **Aprovada** ou **Rejeitada**.
-        - Para usar com **GitHub**, clique em **Raw** no arquivo `.xlsx` e cole a URL aqui para carregar; depois exporte e faça o upload manual do validado.
+        - Aceita meses em **português** (Janeiro ... Dezembro) no cabeçalho, com **ano** (ex.: `Outubro 2025`).\
+        - As células devem conter **dias separados por vírgula** (p.ex. `10,12,13`). Espaços são ignorados.\
+        - A validação registra automaticamente a **data/hora UTC** em `data_validacao` ao marcar **Aprovada** ou **Rejeitada**.\
+        - Para usar com **GitHub**, clique em **Raw** no arquivo `.xlsx` e cole a URL aqui para carregar; depois exporte e faça o upload manual do validado.\
         - Se preferir manter histórico, suba os validados com sufixo de data (ex.: `validado_2025-10-01.xlsx`).
         """
     )
 
 st.success("Pronto! Coloque este app no seu GitHub e rode `streamlit run app.py`.")
+
