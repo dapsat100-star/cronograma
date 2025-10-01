@@ -1,5 +1,5 @@
 
-# app.py — Calendário + validação (sim/não) + GitHub + Auto-load do último XLSX
+# app.py — Calendário + validação (sim/não) + GitHub + Auto-load + Último Autor
 import io
 from typing import Dict, List, Optional
 
@@ -78,6 +78,18 @@ def _list_all_xlsx(path: str):
             files.extend(_list_all_xlsx(it["path"]))
     return files
 
+# ===== Ler metadados do último snapshot =====
+def load_latest_meta() -> dict | None:
+    try:
+        root = _gh_root().rstrip("/")
+        url = f"https://raw.githubusercontent.com/{_gh_repo()}/{_gh_branch()}/{root}/latest.json"
+        r = requests.get(url, timeout=20)
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except Exception:
+        return None
+
 def load_latest_snapshot_df() -> Optional[pd.DataFrame]:
     try:
         all_files = _list_all_xlsx(_gh_root())
@@ -115,13 +127,21 @@ if "df_validado" not in st.session_state:
 if "temp_edits" not in st.session_state:
     st.session_state.temp_edits = None
 
-# Se não há planilha na sessão, tenta auto-carregar do GitHub
+# Se não há planilha na sessão, tenta auto-carregar do GitHub e exibe autor
 if st.session_state.df_validado is None:
     with st.spinner("Carregando último arquivo salvo no GitHub..."):
         df_auto = load_latest_snapshot_df()
+        meta = load_latest_meta()
     if df_auto is not None:
         st.session_state.df_validado = df_auto
         st.success("✅ Último snapshot carregado automaticamente do GitHub.")
+        if meta:
+            autor = meta.get("author", "") or "—"
+            quando = meta.get("saved_at_utc", "")
+            caminho = meta.get("path", "")
+            st.info(f"**Último autor:** {autor}  •  **Salvo (UTC):** {quando}\n\n`{caminho}`")
+            if not st.session_state.get("usuario_logado"):
+                st.session_state["usuario_logado"] = autor
 
 # ===== Utils (para upload inicial de matriz mês/ano) =====
 def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
@@ -226,6 +246,9 @@ with st.sidebar:
     st.checkbox("Mostrar bolinhas/contagem", value=True, key="show_badges")
     st.text_input("Seu nome (autor do commit)", key="usuario_logado", placeholder="ex.: Márcio")
 
+autor_atual = st.session_state.get("usuario_logado", "").strip() or "—"
+st.caption(f"👤 Autor atual para commits: **{autor_atual}**")
+
 mask = st.session_state.df_validado["site_nome"].isin(site_sel) & (st.session_state.df_validado["yyyymm"] == mes_ano)
 fdf = st.session_state.df_validado.loc[mask].copy().sort_values(["data", "site_nome"]) if not st.session_state.df_validado.empty else st.session_state.df_validado.copy()
 
@@ -267,6 +290,20 @@ with col_save2:
 if st.session_state.temp_edits is None or not edited.equals(st.session_state.temp_edits):
     st.session_state.temp_edits = edited.copy()
 
+def exportar_excel(df: pd.DataFrame) -> bytes:
+    cols = ["site_nome", "data", "status", "observacao", "validador", "data_validacao"]
+    cols = [c for c in cols if c in df.columns]
+    df_exp = df[cols].copy()
+    df_exp["data"] = pd.to_datetime(df_exp["data"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    dv = pd.to_datetime(df_exp["data_validacao"], errors="coerce")
+    df_exp["data_validacao"] = dv.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
+    for c in set(df_exp.columns) - {"data", "data_validacao"}:
+        df_exp[c] = df_exp[c].fillna("").astype(str)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df_exp.to_excel(writer, index=False, sheet_name="validacao")
+    buf.seek(0); return buf.read()
+
 if save_clicked:
     base = st.session_state.df_validado
     e = st.session_state.temp_edits.copy()
@@ -291,34 +328,12 @@ if save_clicked:
     st.success("Alterações salvas!")
     # publicar no GitHub
     try:
-        xlsb = (lambda df: (lambda b: b.getvalue())( (lambda buf: (df.assign(data=pd.to_datetime(df["data"]).dt.strftime("%Y-%m-%d"),
-                                                                                 data_validacao=pd.to_datetime(df["data_validacao"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S").fillna(""))
-                                                               .astype({c:str for c in set(df.columns)-{"data","data_validacao"}})
-                                                              ).to_excel(pd.ExcelWriter(buf:=io.BytesIO(), engine="xlsxwriter"), index=False, sheet_name="validacao") or buf )( )))(st.session_state.df_validado)
-    except Exception:
-        # versão legível se a lambda acima for confusa:
-        def exportar_excel(df: pd.DataFrame) -> bytes:
-            cols = ["site_nome", "data", "status", "observacao", "validador", "data_validacao"]
-            cols = [c for c in cols if c in df.columns]
-            df_exp = df[cols].copy()
-            df_exp["data"] = pd.to_datetime(df_exp["data"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
-            dv = pd.to_datetime(df_exp["data_validacao"], errors="coerce")
-            df_exp["data_validacao"] = dv.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
-            for c in set(df_exp.columns) - {"data", "data_validacao"}:
-                df_exp[c] = df_exp[c].fillna("").astype(str)
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-                df_exp.to_excel(writer, index=False, sheet_name="validacao")
-            buf.seek(0); return buf.read()
         xlsb = exportar_excel(st.session_state.df_validado)
-
-    try:
         usuario = st.session_state.get("usuario_logado", "")
         meta = gh_save_snapshot(xlsb, author=usuario)
         st.info(f"Salvo no GitHub: `{meta['path']}` (UTC: {meta['saved_at_utc']})")
     except Exception as e:
         st.warning(f"Salvou localmente, mas falhou ao publicar no GitHub: {e}")
-
     # recalc fdf
     mask = st.session_state.df_validado["site_nome"].isin(site_sel) & (st.session_state.df_validado["yyyymm"] == mes_ano)
     fdf = st.session_state.df_validado.loc[mask].copy().sort_values(["data", "site_nome"]) if not st.session_state.df_validado.empty else st.session_state.df_validado.copy()
@@ -338,12 +353,12 @@ if dias_disponiveis:
             st.session_state.df_validado = base
             st.success(f"Aprovado tudo em {d_sel}.")
             try:
+                xlsb = exportar_excel(st.session_state.df_validado)
                 usuario = st.session_state.get("usuario_logado", "")
-                meta = gh_save_snapshot(xlsb=(lambda df: io.BytesIO((df.assign(data=pd.to_datetime(df["data"]).dt.strftime("%Y-%m-%d"),
-                                                                                     data_validacao=pd.to_datetime(df["data_validacao"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S").fillna(""))
-                                                                        ).to_csv(index=False).encode())).getvalue(), author=usuario)  # fallback rápido
-            except Exception:
-                pass
+                meta = gh_save_snapshot(xlsb, author=usuario)
+                st.info(f"Salvo no GitHub: `{meta['path']}` (UTC: {meta['saved_at_utc']})")
+            except Exception as e:
+                st.warning(f"Falhou ao publicar no GitHub: {e}")
     with cB:
         if st.button("⛔ Rejeitar tudo do dia"):
             base = st.session_state.df_validado
@@ -352,7 +367,13 @@ if dias_disponiveis:
             base.loc[idx & base["data_validacao"].isna(), "data_validacao"] = pd.Timestamp.now(tz="UTC").tz_convert(None)
             st.session_state.df_validado = base
             st.success(f"Rejeitado tudo em {d_sel}.")
-
+            try:
+                xlsb = exportar_excel(st.session_state.df_validado)
+                usuario = st.session_state.get("usuario_logado", "")
+                meta = gh_save_snapshot(xlsb, author=usuario)
+                st.info(f"Salvo no GitHub: `{meta['path']}` (UTC: {meta['saved_at_utc']})")
+            except Exception as e:
+                st.warning(f"Falhou ao publicar no GitHub: {e}")
 else:
     st.caption("Sem passagens no mês/site(s) filtrados.")
 
@@ -476,5 +497,3 @@ with st.expander("🔧 Diagnóstico GitHub", expanded=False):
                 st.error("❌ Não consegui gravar. Veja o JSON acima (repo/branch/token).")
         except Exception as e:
             st.exception(e)
-
-
