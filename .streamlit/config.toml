@@ -1,0 +1,2 @@
+server.fileWatcherType="none"
+server.runOnSave=false
