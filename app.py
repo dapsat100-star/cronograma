@@ -1,3 +1,4 @@
+
 # app.py
 # Streamlit – Calendário com validação via checkboxes "sim"/"nao" integradas ao calendário
 # Entrada: 1ª coluna = site; demais colunas = "Mês Ano" (ex.: "Outubro 2025"), células com dias "10,12,13".
