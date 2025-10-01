@@ -1,7 +1,9 @@
 
 # app.py
-# Streamlit – Calendário com validação via checkboxes "sim"/"nao", ações em lote,
-# exportação Excel "safe" e COMMIT automático no GitHub (via st.secrets).
+# Streamlit – Calendário com validação (checkbox sim/nao), ações em lote,
+# exportação Excel "safe" e commit automático no GitHub (via st.secrets).
+# Inclui painel de Diagnóstico GitHub.
+# Autor: ChatGPT – MIT License
 
 import io
 from typing import Dict, List, Optional
@@ -13,7 +15,12 @@ import streamlit as st
 import requests
 import base64, json, datetime as dt
 
-# ==== GitHub integration (salvar Excel versionado) ====
+# ========== CONFIG PAGE ==========
+st.set_page_config(page_title="Calendário de Passagens – Validação", page_icon="🛰️", layout="wide")
+st.title("🛰️ Calendário de Validação (checkbox sim/nao + GitHub)")
+st.caption("Marque **sim/nao** na tabela, clique em **Salvar** e o app comita o Excel no GitHub (histórico versionado).")
+
+# ========== GitHub integration ==========
 def _gh_headers():
     return {
         "Authorization": f"Bearer {st.secrets['github_token']}",
@@ -27,7 +34,7 @@ def gh_get_file_sha(path: str):
     r = requests.get(url, headers=_gh_headers(), timeout=20)
     return r.json().get("sha") if r.status_code == 200 else None
 
-def gh_put_file(path: str, content_bytes: bytes, message: str, sha: str | None = None):
+def gh_put_file(path: str, content_bytes: bytes, message: str, sha: Optional[str] = None):
     repo = st.secrets["github_repo"]
     branch = st.secrets.get("github_branch", "main")
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
@@ -43,7 +50,7 @@ def gh_put_file(path: str, content_bytes: bytes, message: str, sha: str | None =
         raise RuntimeError(f"Falha ao salvar no GitHub ({r.status_code}): {r.text}")
     return r.json()
 
-def gh_save_snapshot(xls_bytes: bytes, author: str | None = None) -> dict:
+def gh_save_snapshot(xls_bytes: bytes, author: Optional[str] = None) -> dict:
     """
     Salva excel em data/validado/YYYY/MM/validado-YYYYMMDD-HHMMSS.xlsx
     e atualiza data/validado/latest.json com metadados.
@@ -72,27 +79,25 @@ def gh_save_snapshot(xls_bytes: bytes, author: str | None = None) -> dict:
         sha=sha_old,
     )
     return latest
-# ==== fim GitHub integration ====
+# ========== fim GitHub integration ==========
 
-st.set_page_config(page_title="Calendário de Passagens – Validação", page_icon="🛰️", layout="wide")
-st.title("🛰️ Calendário de Validação (checkbox sim/nao + GitHub)")
-st.caption("Marque **sim/nao** na tabela, salve e o app comita o Excel no GitHub (histórico versionado).")
-
+# ========== PT meses ==========
 PT_MESES: Dict[str, int] = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4, "maio": 5, "junho": 6,
     "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
 }
 
+# ========== Session state ==========
 if "df_validado" not in st.session_state:
     st.session_state.df_validado = None
 if "temp_edits" not in st.session_state:
     st.session_state.temp_edits = None
 
-# ---------- Utils ----------
+# ========== Utils ==========
 def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
     cols_mes = []
     for c in df.columns:
-        s = str(c).strip().replace('\\xa0', ' ').lower()
+        s = str(c).strip().replace("\xa0", " ").lower()
         partes = s.split()
         if len(partes) == 2 and partes[0] in PT_MESES:
             try:
@@ -103,34 +108,45 @@ def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
 
 def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = None) -> pd.DataFrame:
     df = df_raw.copy()
-    df.columns = [str(c).strip().replace('\\xa0', ' ') for c in df.columns]
+    df.columns = [str(c).strip().replace("\xa0", " ") for c in df.columns]
+    # detecta coluna de site
     if col_site is None:
         col_site = df.columns[0]
     if col_site != "site_nome":
         df = df.rename(columns={col_site: "site_nome"})
+    # detecta colunas mês
     cols_mes = detectar_colunas_mes(df)
     if not cols_mes:
         raise ValueError("Não foram encontradas colunas no formato 'Mês Ano' (ex.: 'Outubro 2025').")
-    reg = []
+    # explode
+    registros = []
     for _, row in df.iterrows():
         site = row["site_nome"]
         for cm in cols_mes:
             dias_str = row[cm]
-            if pd.isna(dias_str):
+            if pd.isna(dias_str) or str(dias_str).strip() == "":
                 continue
             mes_nome, ano_str = str(cm).strip().split()
-            mes_num = PT_MESES.get(mes_nome.lower()); ano = int(ano_str)
-            dias = [d.strip() for d in str(dias_str).split(',') if d.strip() != ""]
+            mes_num = PT_MESES.get(mes_nome.lower())
+            ano = int(ano_str)
+            dias = [d.strip() for d in str(dias_str).split(",") if d.strip() != ""]
             for d in dias:
                 try:
-                    di = int(d); dt = pd.Timestamp(year=ano, month=mes_num, day=di)
-                    reg.append({"site_nome": site, "data": dt.date(), "status": "Pendente",
-                                "observacao": "", "validador": "", "data_validacao": pd.NaT})
+                    di = int(d)
+                    dt_ = pd.Timestamp(year=ano, month=mes_num, day=di)
+                    registros.append({
+                        "site_nome": site,
+                        "data": dt_.date(),
+                        "status": "Pendente",
+                        "observacao": "",
+                        "validador": "",
+                        "data_validacao": pd.NaT
+                    })
                 except Exception:
                     continue
-    df_expl = pd.DataFrame(reg)
+    df_expl = pd.DataFrame(registros)
     if df_expl.empty:
-        raise ValueError("Nenhuma data válida foi encontrada nas células (ex.: '10,12,13').")
+        raise ValueError("Nenhuma data válida foi encontrada (ex.: células '10,12,13').")
     df_expl["yyyymm"] = pd.to_datetime(df_expl["data"]).dt.strftime("%Y-%m")
     return df_expl.sort_values(["data", "site_nome"]).reset_index(drop=True)
 
@@ -138,7 +154,7 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str,
                       only_color_with_events: bool = True,
                       show_badges: bool = True) -> go.Figure:
     primeiro = pd.to_datetime(f"{mes_ano}-01")
-    ultimo = (primeiro + pd.offsets.MonthEnd(1))
+    ultimo = (primerio := primeiro) + pd.offsets.MonthEnd(1)  # evita sombra
     dias = pd.date_range(primeiro, ultimo, freq="D")
     if df_mes.empty:
         agg = pd.DataFrame(columns=["data","aprovadas","rejeitadas","pendentes","sites"])
@@ -162,18 +178,23 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str,
             return "#B0BEC5"
         return "#2e7d32"
 
-    def weekday_dom(d: pd.Timestamp) -> int: return (d.weekday() + 1) % 7
-    grid = np.full((6, 7), None, dtype=object); week = 0
+    def weekday_dom(d: pd.Timestamp) -> int:
+        return (d.weekday() + 1) % 7
+
+    grid = np.full((6, 7), None, dtype=object)
+    week = 0
     for d in dias:
         col = weekday_dom(d)
-        if col == 0 and d.day != 1: week += 1
+        if col == 0 and d.day != 1:
+            week += 1
         grid[week, col] = d
 
     fig = go.Figure()
     for r in range(6):
         for c in range(7):
             d = grid[r, c]
-            if d is None: continue
+            if d is None:
+                continue
             fill = cor_do_dia(d)
             fig.add_shape(type="rect", x0=c, x1=c+1, y0=5-r, y1=6-r, line=dict(width=1, color="#90A4AE"), fillcolor=fill)
             fig.add_annotation(x=c+0.05, y=5-r+0.85, text=str(d.day), showarrow=False, xanchor="left", yanchor="top", font=dict(size=12))
@@ -185,7 +206,8 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str,
                 if inf["pendentes"] > 0: badges.append(("●", "#607D8B"))
                 x0 = c+0.08
                 for ch, colr in badges:
-                    fig.add_annotation(x=x0, y=y0, text=f"<span style='color:{colr}'>{ch}</span>", showarrow=False, xanchor="left", yanchor="bottom", font=dict(size=12)); x0 += 0.12
+                    fig.add_annotation(x=x0, y=y0, text=f"<span style='color:{colr}'>{ch}</span>", showarrow=False, xanchor="left", yanchor="bottom", font=dict(size=12))
+                    x0 += 0.12
                 txt_cnt = f"{inf['aprovadas']}A/{inf['rejeitadas']}R/{inf['pendentes']}P"
                 fig.add_annotation(x=c+0.95, y=5-r+0.18, text=txt_cnt, showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=10))
             if inf is not None:
@@ -193,7 +215,9 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str,
                 hover = (f"{d.strftime('%Y-%m-%d')}<br>"
                          f"Aprovadas: {inf['aprovadas']} | Rejeitadas: {inf['rejeitadas']} | Pendentes: {inf['pendentes']}<br>"
                          f"Sites: {sites_txt}")
-                fig.add_trace(go.Scatter(x=[c+0.5], y=[5-r+0.5], mode="markers", marker=dict(size=1, color="rgba(0,0,0,0)"), hovertemplate=hover, showlegend=False))
+                fig.add_trace(go.Scatter(x=[c+0.5], y=[5-r+0.5], mode="markers",
+                                         marker=dict(size=1, color="rgba(0,0,0,0)"),
+                                         hovertemplate=hover, showlegend=False))
     fig.update_xaxes(visible=False); fig.update_yaxes(visible=False)
     fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="white", plot_bgcolor="white")
     return fig
@@ -227,34 +251,42 @@ def exportar_excel(df: pd.DataFrame) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# ---------- Entrada ----------
+# ========== Entrada ==========
 with st.expander("📥 Carregar planilha", expanded=True):
     c1, c2 = st.columns([2,1])
-    with c1: up = st.file_uploader("Envie seu Excel (.xlsx)", type=["xlsx"])
-    with c2: url_raw = st.text_input("...ou cole a URL 'raw' do GitHub", placeholder="https://raw.githubusercontent.com/usuario/repo/main/cronograma.xlsx")
+    with c1:
+        up = st.file_uploader("Envie seu Excel (.xlsx)", type=["xlsx"])
+    with c2:
+        url_raw = st.text_input("...ou cole a URL 'raw' do GitHub", placeholder="https://raw.githubusercontent.com/usuario/repo/main/cronograma.xlsx")
     col_site_hint = st.text_input("Nome da coluna do site (opcional)", value="") or None
     b1, b2, b3 = st.columns(3)
     with b1:
         if st.button("Carregar do upload"):
-            if not up: st.warning("Envie um arquivo .xlsx.")
+            if not up:
+                st.warning("Envie um arquivo .xlsx.")
             else:
                 try:
                     df_raw = pd.read_excel(up)
-                    df_raw.columns = [str(c).strip().replace('\\xa0', ' ') for c in df_raw.columns]
-                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint); st.session_state.temp_edits = None
+                    df_raw.columns = [str(c).strip().replace("\xa0", " ") for c in df_raw.columns]
+                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
+                    st.session_state.temp_edits = None
                     st.success("Planilha carregada!")
-                except Exception as e: st.error(f"Erro: {e}")
+                except Exception as e:
+                    st.error(f"Erro: {e}")
     with b2:
         if st.button("Carregar da URL GitHub"):
-            if not url_raw: st.warning("Informe a URL raw do GitHub.")
+            if not url_raw:
+                st.warning("Informe a URL raw do GitHub.")
             else:
                 try:
                     r = requests.get(url_raw, timeout=20); r.raise_for_status()
                     df_raw = pd.read_excel(io.BytesIO(r.content))
-                    df_raw.columns = [str(c).strip().replace('\\xa0', ' ') for c in df_raw.columns]
-                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint); st.session_state.temp_edits = None
+                    df_raw.columns = [str(c).strip().replace("\xa0", " ") for c in df_raw.columns]
+                    st.session_state.df_validado = normalizar_planilha_matriz(df_raw, col_site_hint)
+                    st.session_state.temp_edits = None
                     st.success("Planilha carregada da URL!")
-                except Exception as e: st.error(f"Erro: {e}")
+                except Exception as e:
+                    st.error(f"Erro: {e}")
     with b3:
         if st.button("Gerar exemplo sintético"):
             exemplo = pd.DataFrame({
@@ -263,13 +295,15 @@ with st.expander("📥 Carregar planilha", expanded=True):
                 "Novembro 2025": ["10,12,13,21", "10,12,13,22", "10,12,13,23"],
                 "Dezembro 2025": ["10,12,13,22", "10,12,13,23", "10,12,13,24"],
             })
-            st.session_state.df_validado = normalizar_planilha_matriz(exemplo, col_site="Site"); st.session_state.temp_edits = None
+            st.session_state.df_validado = normalizar_planilha_matriz(exemplo, col_site="Site")
+            st.session_state.temp_edits = None
             st.success("Exemplo carregado!")
 
 if st.session_state.df_validado is None:
-    st.info("Carregue seu Excel para continuar."); st.stop()
+    st.info("Carregue seu Excel para continuar.")
+    st.stop()
 
-# ---------- Filtros ----------
+# ========== Filtros ==========
 with st.sidebar:
     st.header("Filtros")
     dfv = st.session_state.df_validado
@@ -277,15 +311,15 @@ with st.sidebar:
     site_sel = st.multiselect("Sites", options=sites, default=sites)
     meses = sorted(dfv["yyyymm"].unique())
     mes_ano = st.selectbox("Mês", options=meses, index=max(0, len(meses)-1))
-    only_color_with_events = st.checkbox("Colorir só dias com passagem", value=True)
-    show_badges = st.checkbox("Mostrar bolinhas/contagem", value=True)
+    st.checkbox("Colorir só dias com passagem", value=True, key="only_color_with_events")
+    st.checkbox("Mostrar bolinhas/contagem", value=True, key="show_badges")
     st.text_input("Seu nome (autor do commit)", key="usuario_logado", placeholder="ex.: Márcio")
 
 # Aplicar filtros
-mask = dfv["site_nome"].isin(site_sel) & (dfv["yyyymm"] == mes_ano)
-fdf = dfv.loc[mask].copy().sort_values(["data", "site_nome"]) if not dfv.empty else dfv.copy()
+mask = st.session_state.df_validado["site_nome"].isin(site_sel) & (st.session_state.df_validado["yyyymm"] == mes_ano)
+fdf = st.session_state.df_validado.loc[mask].copy().sort_values(["data", "site_nome"]) if not st.session_state.df_validado.empty else st.session_state.df_validado.copy()
 
-# ---------- Tabela com checkboxes ----------
+# ========== Tabela com checkboxes ==========
 st.subheader("Tabela de passagens para validar")
 view = fdf[["site_nome", "data", "status", "observacao", "validador", "data_validacao"]].copy()
 view["data"] = pd.to_datetime(view["data"]).dt.strftime("%Y-%m-%d")
@@ -356,16 +390,15 @@ if save_clicked:
     except Exception as e:
         st.warning(f"Salvou localmente, mas falhou ao publicar no GitHub: {e}")
     # recalc
-    dfv = merged
-    mask = dfv["site_nome"].isin(site_sel) & (dfv["yyyymm"] == mes_ano)
-    fdf = dfv.loc[mask].copy().sort_values(["data", "site_nome"]) if not dfv.empty else dfv.copy()
+    mask = st.session_state.df_validado["site_nome"].isin(site_sel) & (st.session_state.df_validado["yyyymm"] == mes_ano)
+    fdf = st.session_state.df_validado.loc[mask].copy().sort_values(["data", "site_nome"]) if not st.session_state.df_validado.empty else st.session_state.df_validado.copy()
 
-# ---------- Ações em lote ----------
+# ========== Ações em lote ==========
 st.markdown("### ⚙️ Ações em lote por dia")
 dias_disponiveis = sorted(pd.to_datetime(fdf["data"]).dt.date.unique())
 if dias_disponiveis:
     d_sel = st.selectbox("Dia", options=dias_disponiveis, format_func=lambda d: d.strftime("%Y-%m-%d"))
-    cA, cB, cC = st.columns([1,1,6])
+    cA, cB, _ = st.columns([1,1,6])
     with cA:
         if st.button("✅ Aprovar tudo do dia"):
             base = st.session_state.df_validado
@@ -399,23 +432,64 @@ if dias_disponiveis:
 else:
     st.caption("Sem passagens no mês/site(s) filtrados.")
 
-# ---------- Calendário ----------
+# ========== Calendário ==========
 st.subheader("Calendário do mês selecionado")
-fig = montar_calendario(fdf, mes_ano, only_color_with_events=True, show_badges=True)
+fig = montar_calendario(fdf, mes_ano, only_color_with_events=st.session_state.get("only_color_with_events", True),
+                        show_badges=st.session_state.get("show_badges", True))
 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-# ---------- Exportar manual ----------
+# ========== Exportar manual ==========
 st.markdown("---"); st.subheader("Exportar")
 colA, colB = st.columns([1,2])
-with colA: nome_arquivo = st.text_input("Nome do arquivo", value="passagens_validado.xlsx")
+with colA:
+    nome_arquivo = st.text_input("Nome do arquivo", value="passagens_validado.xlsx")
 with colB:
     xlsb = exportar_excel(st.session_state.df_validado)
-    st.download_button("Baixar Excel validado", data=xlsb, file_name=nome_arquivo, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("Baixar Excel validado", data=xlsb, file_name=nome_arquivo,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-with st.expander("ℹ️ Notas", expanded=False):
-    st.markdown(
-        "- Preencha os **Secrets** no Streamlit Cloud: `github_token`, `github_repo`, `github_branch`, `gh_data_root`.\n"
-        "- Cada **Salvar** ou ação em lote cria um **snapshot versionado** no repositório configurado.\n"
-        "- Os arquivos ficam em `gh_data_root/AAAA/MM/validado-AAAAMMDD-HHMMSS.xlsx` + `latest.json`.\n"
-        "- Meses em português (Janeiro..Dezembro) com ano no cabeçalho; células com dias `10,12,13`."
-    )
+# ========== Diagnóstico GitHub ==========
+with st.expander("🔧 Diagnóstico GitHub", expanded=False):
+    has_token  = "github_token"  in st.secrets
+    has_repo   = "github_repo"   in st.secrets
+    has_branch = "github_branch" in st.secrets
+    has_root   = "gh_data_root"  in st.secrets
+    st.write("Secrets:", {
+        "github_token": has_token,
+        "github_repo": has_repo,
+        "github_branch": has_branch,
+        "gh_data_root": has_root
+    })
+    if has_repo:   st.write("Repo:", st.secrets["github_repo"])
+    if has_branch: st.write("Branch:", st.secrets["github_branch"])
+    if has_root:   st.write("Raiz:", st.secrets["gh_data_root"])
+
+    if st.button("🔎 Testar conexão e gravar ping.txt"):
+        try:
+            import datetime as _dt, base64 as _b64, requests as _req
+            now = _dt.datetime.utcnow()
+            stamp = now.strftime("%Y%m%d-%H%M%S")
+            path = f"{st.secrets.get('gh_data_root','data/validado')}/diagnostics/ping-{stamp}.txt"
+            url  = f"https://api.github.com/repos/{st.secrets['github_repo']}/contents/{path}"
+            payload = {
+                "message": f"diagnostics: ping {stamp}",
+                "content": _b64.b64encode(f'ping {stamp}\n'.encode("utf-8")).decode("utf-8"),
+                "branch": st.secrets.get("github_branch","main"),
+            }
+            headers = {
+                "Authorization": f"Bearer {st.secrets['github_token']}",
+                "Accept": "application/vnd.github+json",
+            }
+            r = _req.put(url, headers=headers, json=payload, timeout=30)
+            st.write("HTTP:", r.status_code)
+            try:
+                st.json(r.json())
+            except Exception:
+                st.write(r.text)
+            if r.status_code in (200, 201):
+                st.success("✅ Consegui gravar no GitHub. O fluxo de salvar Excel deve funcionar também.")
+            else:
+                st.error("❌ Não consegui gravar. Veja o JSON acima para a causa exata (repo/branch/token).")
+        except Exception as e:
+            st.exception(e)
+
