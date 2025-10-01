@@ -273,7 +273,18 @@ fdf = dfv.loc[mask].copy().sort_values(["data", "site_nome"]) if not dfv.empty e
 # -----------------------------
 st.subheader("Tabela de passagens para validar")
 editavel = fdf[["site_nome", "data", "status", "observacao", "validador", "data_validacao"]].copy()
+
+# 1) Formatação amigável para exibição
 editavel["data"] = pd.to_datetime(editavel["data"]).dt.strftime("%Y-%m-%d")
+
+# 2) Garantir dtypes compatíveis com Streamlit data_editor + column_config
+#    - TextColumn/SelectboxColumn esperam dtype 'object'/'string'/'category', não datetime64
+editavel["status"] = editavel["status"].astype("string")
+editavel["observacao"] = editavel["observacao"].astype("string")
+editavel["validador"] = editavel["validador"].astype("string")
+editavel["data_validacao"] = editavel["data_validacao"].apply(
+    lambda x: "" if pd.isna(x) else pd.to_datetime(x).strftime("%Y-%m-%d %H:%M:%S")
+).astype("string")
 
 edited = st.data_editor(
     editavel,
@@ -292,12 +303,14 @@ edited = st.data_editor(
 if not edited.equals(editavel):
     base = st.session_state.df_validado
     edited_tmp = edited.copy()
+    # retorna 'data' para tipo date
     edited_tmp["data"] = pd.to_datetime(edited_tmp["data"]).dt.date
 
     keys = ["site_nome", "data"]
     upd_cols = ["status", "observacao", "validador"]
     base = base.drop(columns=upd_cols, errors="ignore").merge(edited_tmp[keys + upd_cols], on=keys, how="left")
 
+    # carimbo automático quando status vira Aprovada/Rejeitada e ainda não há timestamp
     mudou = base["status"].isin(["Aprovada", "Rejeitada"]) & base["data_validacao"].isna()
     agora = pd.Timestamp.utcnow()
     base.loc[mudou, "data_validacao"] = agora
