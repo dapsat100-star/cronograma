@@ -1,4 +1,3 @@
-
 # app.py
 # Streamlit – Calendário de validação a partir de Excel "matriz de meses" (PT-BR)
 # Entrada: 1ª coluna = nome do site; Demais colunas = "Mês Ano" (ex.: "Outubro 2025").
@@ -8,7 +7,6 @@
 # Autor: ChatGPT – MIT License
 
 import io
-from datetime import date, datetime
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -33,7 +31,7 @@ st.caption(
 # -----------------------------
 # 🧾 Layout esperado do Excel (exemplo)
 # -----------------------------
-# Coluna 1: nome do site (no seu arquivo veio como "Unnamed: 0" ou "Site")
+# Coluna 1: nome do site (no seu arquivo pode vir como "Unnamed: 0" ou "Site")
 # Demais colunas: "Outubro 2025", "Novembro 2025", ... (português)
 # Células: dias separados por vírgula, p.ex. "10,12,13,21"
 
@@ -59,7 +57,7 @@ def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
     """Retorna as colunas que parecem ser "Mês Ano" em PT-BR."""
     cols_mes = []
     for c in df.columns:
-        s = str(c).strip().lower()
+        s = str(c).strip().replace('\xa0', ' ').lower()
         partes = s.split()
         if len(partes) == 2 and partes[0] in PT_MESES:
             try:
@@ -69,11 +67,14 @@ def detectar_colunas_mes(df: pd.DataFrame) -> List[str]:
                 pass
     return cols_mes
 
+
 def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = None) -> pd.DataFrame:
     """Converte a planilha matriz (site x meses com dias separados por vírgula) em DF 'explodido':
     colunas: site_nome, data (date), status, observacao, validador, data_validacao.
     """
+    # cópia e normalização de cabeçalhos (garante nomes limpos)
     df = df_raw.copy()
+    df.columns = [str(c).strip().replace('\xa0', ' ') for c in df.columns]
 
     # Detecta coluna do site (se não informada, assume a primeira coluna)
     if col_site is None:
@@ -82,24 +83,24 @@ def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = N
     if col_site != "site_nome":
         df = df.rename(columns={col_site: "site_nome"})
 
-    # Identifica colunas de mês
+    # Identifica colunas de mês (ex.: "Outubro 2025")
     cols_mes = detectar_colunas_mes(df)
     if not cols_mes:
         raise ValueError("Não foram encontradas colunas no formato 'Mês Ano' (ex.: 'Outubro 2025').")
 
-    # Empilha meses
+    # Empilha meses — USANDO iterrows() para nomes com espaços/acentos
     reg = []
-    for row in df.itertuples(index=False):
-        site = getattr(row, "site_nome")
+    for i, row in df.iterrows():
+        site = row["site_nome"]
         for cm in cols_mes:
-            dias_str = getattr(row, cm)
+            dias_str = row[cm]
             if pd.isna(dias_str):
                 continue
             mes_nome, ano_str = str(cm).strip().split()
             mes_num = PT_MESES.get(mes_nome.lower())
             ano = int(ano_str)
 
-            # Quebra pelos dias (ex.: "10,12,13"). Aceita espaço depois da vírgula.
+            # Quebra pelos dias "10,12,13" (ignora espaços)
             dias = [d.strip() for d in str(dias_str).split(',') if d.strip() != ""]
             for d in dias:
                 try:
@@ -107,22 +108,23 @@ def normalizar_planilha_matriz(df_raw: pd.DataFrame, col_site: Optional[str] = N
                     dt = pd.Timestamp(year=ano, month=mes_num, day=di)
                     reg.append({"site_nome": site, "data": dt.date()})
                 except Exception:
-                    # ignora tokens inválidos (ex.: células sujas)
+                    # ignora tokens inválidos na célula
                     continue
 
     df_expl = pd.DataFrame(reg)
     if df_expl.empty:
-        raise ValueError("Nenhuma data válida foi encontrada nas células (verifique se há dias como '10,12,13').")
+        raise ValueError("Nenhuma data válida foi encontrada nas células (confira se há dias como '10,12,13').")
 
-    # Adiciona colunas de status/metadata
+    # Colunas de validação
     df_expl["status"] = "Pendente"
     df_expl["observacao"] = ""
     df_expl["validador"] = ""
     df_expl["data_validacao"] = pd.NaT
 
-    # Campos auxiliares
+    # Auxiliar para filtros
     df_expl["yyyymm"] = pd.to_datetime(df_expl["data"]).dt.strftime("%Y-%m")
     return df_expl.sort_values(["data", "site_nome"]).reset_index(drop=True)
+
 
 def montar_calendario(df_mes: pd.DataFrame, mes_ano: str) -> go.Figure:
     """Desenha um calendário mensal (cores por status mais severo do dia)."""
@@ -181,6 +183,7 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str) -> go.Figure:
     fig.update_yaxes(visible=False)
     fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="white", plot_bgcolor="white")
     return fig
+
 
 def exportar_excel(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
@@ -329,10 +332,10 @@ with colB:
 with st.expander("ℹ️ Notas e dicas", expanded=False):
     st.markdown(
         """
-        - Aceita meses em **português** (Janeiro ... Dezembro) no cabeçalho, com **ano** (ex.: `Outubro 2025`).\
-        - As células devem conter **dias separados por vírgula** (p.ex. `10,12,13`). Espaços são ignorados.\
-        - A validação registra automaticamente a **data/hora UTC** em `data_validacao` ao marcar **Aprovada** ou **Rejeitada**.\
-        - Para usar com **GitHub**, clique em **Raw** no arquivo `.xlsx` e cole a URL aqui para carregar; depois exporte e faça o upload manual do validado.\
+        - Aceita meses em **português** (Janeiro ... Dezembro) no cabeçalho, com **ano** (ex.: `Outubro 2025`).
+        - As células devem conter **dias separados por vírgula** (p.ex. `10,12,13`). Espaços são ignorados.
+        - A validação registra automaticamente a **data/hora UTC** em `data_validacao` ao marcar **Aprovada** ou **Rejeitada**.
+        - Para usar com **GitHub**, clique em **Raw** no arquivo `.xlsx` e cole a URL aqui para carregar; depois exporte e faça o upload manual do validado.
         - Se preferir manter histórico, suba os validados com sufixo de data (ex.: `validado_2025-10-01.xlsx`).
         """
     )
