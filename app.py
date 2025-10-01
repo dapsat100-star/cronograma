@@ -1,4 +1,3 @@
-
 # app.py
 # Streamlit – Calendário com validação (checkbox sim/nao), ações em lote,
 # exportação Excel "safe" e commit automático no GitHub (via st.secrets).
@@ -332,7 +331,7 @@ view["data_validacao"] = view["data_validacao"].apply(lambda x: "" if pd.isna(x)
 edited = st.data_editor(
     view,
     num_rows="fixed",
-    use_container_width=True,
+    width='stretch',
     column_config={
         "sim": st.column_config.CheckboxColumn(label="Confirmar (sim)", help="Marca como Aprovada"),
         "nao": st.column_config.CheckboxColumn(label="Rejeitar (nao)", help="Marca como Rejeitada"),
@@ -377,7 +376,7 @@ if save_clicked:
     merged.loc[mask_new, "status"] = merged.loc[mask_new, "status_novo"]
     merged = merged.drop(columns=["status_novo"])
     mudou = merged["status"].isin(["Aprovada", "Rejeitada"]) & merged["data_validacao"].isna()
-    merged.loc[mudou, "data_validacao"] = pd.Timestamp.utcnow()
+    merged.loc[mudou, "data_validacao"] = pd.Timestamp.now(tz="UTC").tz_convert(None)
     st.session_state.df_validado = merged
     st.session_state.temp_edits = None
     st.success("Alterações salvas!")
@@ -404,7 +403,7 @@ if dias_disponiveis:
             base = st.session_state.df_validado
             idx = (pd.to_datetime(base["data"]).dt.date == d_sel) & base["site_nome"].isin(site_sel) & (base["yyyymm"] == mes_ano)
             base.loc[idx, "status"] = "Aprovada"
-            base.loc[idx & base["data_validacao"].isna(), "data_validacao"] = pd.Timestamp.utcnow()
+            base.loc[idx & base["data_validacao"].isna(), "data_validacao"] = pd.Timestamp.now(tz="UTC").tz_convert(None)
             st.session_state.df_validado = base
             st.success(f"Aprovado tudo em {d_sel}.")
             try:
@@ -419,7 +418,7 @@ if dias_disponiveis:
             base = st.session_state.df_validado
             idx = (pd.to_datetime(base["data"]).dt.date == d_sel) & base["site_nome"].isin(site_sel) & (base["yyyymm"] == mes_ano)
             base.loc[idx, "status"] = "Rejeitada"
-            base.loc[idx & base["data_validacao"].isna(), "data_validacao"] = pd.Timestamp.utcnow()
+            base.loc[idx & base["data_validacao"].isna(), "data_validacao"] = pd.Timestamp.now(tz="UTC").tz_convert(None)
             st.session_state.df_validado = base
             st.success(f"Rejeitado tudo em {d_sel}.")
             try:
@@ -436,7 +435,7 @@ else:
 st.subheader("Calendário do mês selecionado")
 fig = montar_calendario(fdf, mes_ano, only_color_with_events=st.session_state.get("only_color_with_events", True),
                         show_badges=st.session_state.get("show_badges", True))
-st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+st.plotly_chart(fig, width='stretch', config={"displayModeBar": False})
 
 # ========== Exportar manual ==========
 st.markdown("---"); st.subheader("Exportar")
@@ -492,4 +491,5 @@ with st.expander("🔧 Diagnóstico GitHub", expanded=False):
                 st.error("❌ Não consegui gravar. Veja o JSON acima para a causa exata (repo/branch/token).")
         except Exception as e:
             st.exception(e)
+
 
