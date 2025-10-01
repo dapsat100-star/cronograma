@@ -93,15 +93,17 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str, only_color_with_events
                           sites=("site_nome", lambda s: sorted(set(s))))
                      .reset_index())
     info_map = {row["data"]: row for _, row in agg.iterrows()}
+
     def cor_do_dia(d: pd.Timestamp) -> str:
         inf = info_map.get(d.date())
-        if not inf:
+        if inf is None:
             return "#ECEFF1" if only_color_with_events else "#B0BEC5"
         if inf["rejeitadas"] > 0:
             return "#c62828"
         if inf["pendentes"] > 0 and inf["aprovadas"] == 0:
             return "#B0BEC5"
         return "#2e7d32"
+
     def weekday_dom(d: pd.Timestamp) -> int:
         return (d.weekday() + 1) % 7
     grid = np.full((6, 7), None, dtype=object)
@@ -121,7 +123,7 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str, only_color_with_events
             fig.add_shape(type="rect", x0=c, x1=c+1, y0=5-r, y1=6-r, line=dict(width=1, color="#90A4AE"), fillcolor=fill)
             fig.add_annotation(x=c+0.05, y=5-r+0.85, text=str(d.day), showarrow=False, xanchor="left", yanchor="top", font=dict(size=12))
             inf = info_map.get(d.date())
-            if show_badges and inf:
+            if show_badges and (inf is not None):
                 y0 = 5-r+0.18
                 badges = []
                 if inf["aprovadas"] > 0: badges.append(("●", "#2e7d32"))
@@ -133,7 +135,7 @@ def montar_calendario(df_mes: pd.DataFrame, mes_ano: str, only_color_with_events
                     x0 += 0.12
                 txt_cnt = f"{inf['aprovadas']}A/{inf['rejeitadas']}R/{inf['pendentes']}P"
                 fig.add_annotation(x=c+0.95, y=5-r+0.18, text=txt_cnt, showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=10))
-            if inf:
+            if inf is not None:
                 sites_txt = ", ".join(inf["sites"]) if inf["sites"] else "-"
                 hover = (f"{d.strftime('%Y-%m-%d')}<br>"
                          f"Aprovadas: {inf['aprovadas']} | Rejeitadas: {inf['rejeitadas']} | Pendentes: {inf['pendentes']}<br>"
@@ -272,4 +274,5 @@ with st.expander("ℹ️ Notas e dicas", expanded=False):
     )
 
 st.success("Pronto! Coloque este app no seu GitHub e rode `streamlit run app.py`.")
+
 
